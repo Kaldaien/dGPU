@@ -42,7 +42,7 @@
 
 #include <atlbase.h>
 
-#define DGPU_VERSION_NUM L"0.0.7"
+#define DGPU_VERSION_NUM L"0.1.0"
 #define DGPU_VERSION_STR L".hack//G.P.U. v " DGPU_VERSION_NUM
 
 volatile LONG __DGPU_init = FALSE;
@@ -73,6 +73,8 @@ static SK_ReShade_SetResolutionScale_pfn SK_ReShade_SetResolutionScale = nullptr
 using SK_PlugIn_ControlPanelWidget_pfn = void (__stdcall         *)(void);
 static SK_PlugIn_ControlPanelWidget_pfn SK_PlugIn_ControlPanelWidget_Original = nullptr;
 
+size_t SK_DGPU_MipmapCacheSize = 0ULL;
+
 struct dpgu_cfg_s
 {
   sk::ParameterFactory factory;
@@ -81,6 +83,12 @@ struct dpgu_cfg_s
   {
     sk::ParameterFloat* scale = nullptr;
   } antialiasing;
+
+  struct mipmaps_s
+  {
+    sk::ParameterBool* cache_mipmaps        = nullptr;
+    sk::ParameterBool* uncompressed_mipmaps = nullptr;
+  } mipmaps;
 } dgpu_config;
 
 
@@ -165,32 +173,91 @@ SK_DGPU_ControlPanel (void)
       ImGui::TreePop  ();
     }
 
-    if (ImGui::CollapsingHeader ("Texture Management", ImGuiTreeNodeFlags_DefaultOpen))
+    if (ImGui::CollapsingHeader ("Texture Management##DotHack", ImGuiTreeNodeFlags_DefaultOpen))
     {
       ImGui::TreePush    ("");
+      ImGui::BeginGroup  ();
       ImGui::Checkbox    ("Generate Mipmaps", &config.textures.d3d11.generate_mips);
 
       if (ImGui::IsItemHovered ())
       {
         ImGui::BeginTooltip    ();
+        ImGui::PushStyleColor  (ImGuiCol_Text, ImColor::HSV (0.5f, 0.f, 1.f, 1.f));
         ImGui::TextUnformatted ("Builds Complete Mipchains (Mipmap LODs) for all Textures");
         ImGui::Separator       ();
-        ImGui::BulletText      ("SIGNIFICANLY reduces texture aliasing");
-        ImGui::BulletText      ("May introduce slightly longer load-times, but should be mitigated over time by texture caching.");
+        ImGui::PopStyleColor   ();
+        ImGui::Bullet          (); ImGui::SameLine ();
+        ImGui::PushStyleColor  (ImGuiCol_Text, ImColor::HSV (0.15f, 1.0f, 1.0f));
+        ImGui::TextUnformatted ("SIGNIFICANTLY");
+        ImGui::PopStyleColor   (); ImGui::SameLine ();
+        ImGui::TextUnformatted ("reduces texture aliasing");
+        ImGui::BulletText      ("May introduce slightly longer load-times, use the cache options to minimize this.");
         ImGui::EndTooltip      ();
       }
 
-      if (! config.textures.d3d11.generate_mips)
+      if (config.textures.d3d11.generate_mips)
       {
-        ImGui::SameLine    ();
-        ImGui::TextColored (ImVec4 (0.5f, 1.0f, 0.1f, 1.0f), " Enable to reduce texture aliasing");
+        bool changed  = false;
+             changed |= ImGui::Checkbox ("Cache Mipmaps to Disk", &config.textures.d3d11.cache_gen_mips);
+
+        if (ImGui::IsItemHovered ())
+          ImGui::SetTooltip ("Eliminates virtually all stutter, but may consume a lot of disk space.");
+
+        ImGui::EndGroup ();
+        ImGui::SameLine ();
+
+        ImGui::BeginGroup      ();
+        ImGui::TextUnformatted ("Mipmap Quality "); ImGui::SameLine ();
+
+        int sel = config.textures.d3d11.uncompressed_mips ? 1 : 0;
+
+        changed |= ImGui::Combo ("###dGPU_MipmapQuality", &sel, "Compressed (Low)\0Uncompressed (High)\0\0", 2);
+
+        if (ImGui::IsItemHovered ())
+          ImGui::SetTooltip ("Uncompressed textures stutter less, but use more memory.");
+
+        if (ImGui::Button   (" Purge Cache "))
+        {
+          wchar_t wszPath [ MAX_PATH + 2 ] = { };
+
+          wcscpy ( wszPath,
+                     SK_EvalEnvironmentVars (config.textures.d3d11.res_root.c_str ()).c_str () );
+
+          lstrcatW (wszPath, L"/inject/textures/MipmapCache/");
+          lstrcatW (wszPath, SK_GetHostApp ());
+          lstrcatW (wszPath, L"/");
+
+          SK_DGPU_MipmapCacheSize -= SK_DeleteTemporaryFiles (wszPath, L"*.dds");
+          SK_DGPU_MipmapCacheSize  = 0;
+        }
+        ImGui::SameLine ();
+        ImGui::Text     ("Current Cache Size: %.2f MiB", (double)SK_DGPU_MipmapCacheSize / (1024.0 * 1024.0));
+        ImGui::EndGroup ();
+
+        if (changed)
+        {
+          dgpu_config.mipmaps.cache_mipmaps->store        (config.textures.d3d11.cache_gen_mips);
+          dgpu_config.mipmaps.uncompressed_mipmaps->store (sel == 1 ? true : false);
+
+          SK_GetDLLConfig ()->write (SK_GetDLLConfig ()->get_filename ());
+        }
       }
 
       else
-      {
-        ImGui::SameLine    ();
-        ImGui::TextColored (ImVec4 (1.0f, 0.5f, 0.1f, 1.0f), " Disable to reduce load time");
-      }
+        ImGui::EndGroup ();
+
+
+      //if (! config.textures.d3d11.generate_mips)
+      //{
+      //  ImGui::SameLine    ();
+      //  ImGui::TextColored (ImVec4 (0.5f, 1.0f, 0.1f, 1.0f), " Enable to reduce texture aliasing");
+      //}
+      //
+      //else
+      //{
+      //  ImGui::SameLine    ();
+      //  ImGui::TextColored (ImVec4 (1.0f, 0.5f, 0.1f, 1.0f), " Disable to reduce load time");
+      //}
 
       ImGui::TreePop           ();
     }
@@ -241,6 +308,27 @@ SK_DGPU_InitPlugin (void)
                                                         L"Scale" );
 
   dgpu_config.antialiasing.scale->load (aa_prefs.scale);
+
+
+  dgpu_config.mipmaps.cache_mipmaps =
+      dynamic_cast <sk::ParameterBool *>
+        (dgpu_config.factory.create_parameter <bool> (L"Cache Mipmaps on Disk"));
+
+  dgpu_config.mipmaps.cache_mipmaps->register_to_ini ( SK_GetDLLConfig (),
+                                                         L"dGPU.Mipmaps",
+                                                           L"CacheOnDisk" );
+
+  dgpu_config.mipmaps.uncompressed_mipmaps =
+      dynamic_cast <sk::ParameterBool *>
+        (dgpu_config.factory.create_parameter <bool> (L"Do not compress mipmaps"));
+
+  dgpu_config.mipmaps.uncompressed_mipmaps->register_to_ini ( SK_GetDLLConfig (),
+                                                                L"dGPU.Mipmaps",
+                                                                  L"Uncompressed" );
+
+
+  dgpu_config.mipmaps.cache_mipmaps->load        (config.textures.d3d11.cache_gen_mips);
+  dgpu_config.mipmaps.uncompressed_mipmaps->load (config.textures.d3d11.uncompressed_mips);
 
   SK_CreateFuncHook (       L"SK_PlugIn_ControlPanelWidget",
                               SK_PlugIn_ControlPanelWidget,
