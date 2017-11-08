@@ -42,7 +42,7 @@
 
 #include <atlbase.h>
 
-#define DGPU_VERSION_NUM L"0.1.0"
+#define DGPU_VERSION_NUM L"0.1.0.3"
 #define DGPU_VERSION_STR L".hack//G.P.U. v " DGPU_VERSION_NUM
 
 volatile LONG __DGPU_init = FALSE;
